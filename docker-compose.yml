@@ -1,0 +1,169 @@
+# docker-compose.yml
+name: vidtranscribe
+
+services:
+  # =============================================================================
+  # POSTGRESQL (Base de datos principal)
+  # =============================================================================
+  postgres:
+    image: postgres:16-alpine
+    container_name: vidtranscribe-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${DB_USER:-postgres}
+      POSTGRES_PASSWORD: ${DB_PASSWORD:-postgres}
+      POSTGRES_DB: ${DB_NAME:-vidtranscribe}
+    ports:
+      - "5432:5432"  # 🔐 En producción: comentar para no exponer públicamente
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./docker/postgres/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${DB_USER:-postgres} -d ${DB_NAME:-vidtranscribe}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    networks:
+      - vidtranscribe-net
+
+  # =============================================================================
+  # REDIS (Cola de tareas para Celery)
+  # =============================================================================
+  redis:
+    image: redis:7-alpine
+    container_name: vidtranscribe-redis
+    restart: unless-stopped
+    command: redis-server --appendonly yes --maxmemory 256mb --maxmemory-policy allkeys-lru
+    ports:
+      - "6379:6379"  # 🔐 En producción: comentar para no exponer
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+      start_period: 10s
+    networks:
+      - vidtranscribe-net
+
+  # =============================================================================
+  # PGADMIN (Opcional: interfaz web para gestionar PostgreSQL)
+  # =============================================================================
+  pgadmin:
+    image: dpage/pgadmin4:latest
+    container_name: vidtranscribe-pgadmin
+    restart: unless-stopped
+    environment:
+      PGADMIN_DEFAULT_EMAIL: ${PGADMIN_EMAIL:-admin@vidtranscribe.local}
+      PGADMIN_DEFAULT_PASSWORD: ${PGADMIN_PASSWORD:-admin}
+      PGADMIN_CONFIG_SERVER_MODE: "False"
+    ports:
+      - "5050:80"
+    volumes:
+      - pgadmin_data:/var/lib/pgadmin
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - vidtranscribe-net
+    profiles:
+      - tools  # Solo se inicia con: docker compose --profile tools up
+
+  # =============================================================================
+  # API (FastAPI - Servidor principal)
+  # =============================================================================
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: vidtranscribe-api
+    restart: unless-stopped
+    ports:
+      - "8000:8000"  # Acceso local: http://localhost:8000
+    environment:
+      # Conexiones internas usando nombres de servicio de Docker
+      - DATABASE_URL=postgresql+psycopg2://${DB_USER:-postgres}:${DB_PASSWORD:-postgres}@postgres:5432/${DB_NAME:-vidtranscribe}
+      - REDIS_URL=redis://redis:6379/0
+      # Variables de aplicación
+      - UPLOAD_DIR=/app/uploads
+      - MAX_FILE_SIZE_MB=${MAX_FILE_SIZE_MB:-1500}
+      - MAX_DURATION_MIN=${MAX_DURATION_MIN:-120}
+      - CHUNK_DURATION_SEC=${CHUNK_DURATION_SEC:-150}
+      - CHUNK_OVERLAP_SEC=${CHUNK_OVERLAP_SEC:-5}
+      - GEMINI_MODEL=${GEMINI_MODEL:-gemini-2.5-flash}
+      # Claves de API (inyectar desde .env host o secrets manager)
+      - GEMINI_API_KEYS=${GEMINI_API_KEYS}
+      - DEBUG=${DEBUG:-false}
+    volumes:
+      # Montar uploads para persistencia y acceso desde worker
+      - ./uploads:/app/uploads
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - vidtranscribe-net
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+
+  # =============================================================================
+  # WORKER (Celery - Procesamiento asíncrono de videos)
+  # =============================================================================
+  worker:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: vidtranscribe-worker
+    restart: unless-stopped
+    # Sobrescribe el CMD del Dockerfile para ejecutar Celery
+    command: celery -A src.tasks worker --loglevel=info -c 4
+    environment:
+      # Mismas variables que la API para consistencia
+      - DATABASE_URL=postgresql+psycopg2://${DB_USER:-postgres}:${DB_PASSWORD:-postgres}@postgres:5432/${DB_NAME:-vidtranscribe}
+      - REDIS_URL=redis://redis:6379/0
+      - UPLOAD_DIR=/app/uploads
+      - MAX_FILE_SIZE_MB=${MAX_FILE_SIZE_MB:-1500}
+      - MAX_DURATION_MIN=${MAX_DURATION_MIN:-120}
+      - CHUNK_DURATION_SEC=${CHUNK_DURATION_SEC:-150}
+      - CHUNK_OVERLAP_SEC=${CHUNK_OVERLAP_SEC:-5}
+      - GEMINI_MODEL=${GEMINI_MODEL:-gemini-2.5-flash}
+      - GEMINI_API_KEYS=${GEMINI_API_KEYS}
+      - DEBUG=${DEBUG:-false}
+    volumes:
+      # Mismo volumen de uploads para acceder a los archivos procesados
+      - ./uploads:/app/uploads
+    depends_on:
+      api:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - vidtranscribe-net
+    # Opcional: limitar recursos para evitar que un worker consuma todo el VPS
+    deploy:
+      resources:
+        limits:
+          cpus: '2'
+          memory: 1G
+
+# =============================================================================
+# VOLÚMENES PERSISTENTES
+# =============================================================================
+volumes:
+  postgres_data:
+  redis_data:
+  pgadmin_data:
+
+# =============================================================================
+# REDES AISLADAS
+# =============================================================================
+networks:
+  vidtranscribe-net:
+    driver: bridge

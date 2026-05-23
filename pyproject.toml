@@ -1,0 +1,63 @@
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "vidtranscribe"
+version = "0.1.0"
+description = "MVP Backend: Transcripción inteligente de videos con Gemini IA, chunking y búsqueda full-text"
+requires-python = ">=3.11"
+dependencies = [
+    "fastapi>=0.115.0",
+    "uvicorn[standard]>=0.32.0",
+    "sqlalchemy>=2.0.36",
+    "alembic>=1.14.0",
+    "psycopg2-binary>=2.9.10",
+    "pydantic>=2.10.0",
+    "pydantic-settings>=2.6.0",
+    "celery[redis]>=5.4.0",
+    "redis>=5.2.0",
+    "google-genai>=1.0.0",
+    "ffmpeg-python>=0.2.0",
+    "pydub>=0.25.1",
+    "python-multipart>=0.0.18",
+    "pytz>=2024.2",
+    "python-dotenv>=1.0.1",
+]
+
+[project.optional-dependencies]
+# Dependencias para desarrollo, testing y scripts de integración
+dev = [
+    "black>=24.10.0",
+    "ruff>=0.8.0",
+    "pytest>=8.3.0",
+    "httpx>=0.28.0",      
+    "rich>=13.9.0",       
+]
+
+# Dependencias solo para producción (si necesitas separar)
+prod = [
+    # Same as main dependencies, explicit for clarity
+    "fastapi>=0.115.0",
+    "uvicorn[standard]>=0.32.0",
+    "sqlalchemy>=2.0.36",
+    "alembic>=1.14.0",
+    "psycopg2-binary>=2.9.10",
+    "pydantic>=2.10.0",
+    "pydantic-settings>=2.6.0",
+    "celery[redis]>=5.4.0",
+    "redis>=5.2.0",
+    "google-genai>=1.0.0",
+    "ffmpeg-python>=0.2.0",
+    "pydub>=0.25.1",
+    "python-multipart>=0.0.18",
+    "pytz>=2024.2",
+    "python-dotenv>=1.0.1",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.black]
+line-length = 100

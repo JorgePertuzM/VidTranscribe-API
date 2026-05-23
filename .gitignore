@@ -1,0 +1,70 @@
+
+### 🔹 Crear `.gitignore` (CRÍTICO - Copia Esto)
+```gitignore
+# ================= Python =================
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# ================= Entorno Virtual =================
+.venv/
+venv/
+ENV/
+env/
+
+# ================= IDE =================
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# ================= Secrets y Config =================
+.env
+.env.local
+.env.*.local
+*.key
+*.pem
+
+# ================= Docker =================
+!.dockerignore
+docker-compose.override.yml
+
+# ================= Uploads y Datos =================
+uploads/
+*.mp4
+*.mkv
+*.avi
+*.mov
+*.webm
+*.mp3
+*.log
+
+# ================= Base de Datos =================
+*.sqlite
+*.sqlite3
+*.db
+
+# ================= Frontend Build =================
+frontend/dist/
+frontend/node_modules/
+
+# ================= Documentación =================
+doc/_build/
+*.pdf
