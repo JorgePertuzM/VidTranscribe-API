@@ -16,7 +16,7 @@ def health_check():
     redis_ok = False
     try:
         import redis
-        r = redis.from_url(settings.redis_url, socket_connect_timeout=2)
+        r = redis.from_url(settings.effective_redis_url, socket_connect_timeout=2)
         r.ping()
         redis_ok = True
     except: pass

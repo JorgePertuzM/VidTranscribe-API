@@ -3,14 +3,15 @@ from sqlalchemy import create_engine, text
 from sqlalchemy.orm import sessionmaker, DeclarativeBase, Mapped, mapped_column
 from src.config import settings
 
-# ✅ CORRECCIÓN: Base debe ser una CLASE que hereda de DeclarativeBase
+# ✅ Base debe ser una CLASE que hereda de DeclarativeBase
 class Base(DeclarativeBase):
     """Clase base para todos los modelos ORM de SQLAlchemy 2.0"""
     pass
 
 # Engine síncrono (compatible con Celery, Alembic y scripts CLI)
+# ✅ CORRECCIÓN: Usar effective_database_url en lugar de database_url
 engine = create_engine(
-    settings.database_url,
+    settings.effective_database_url,  # ← Cambiado aquí
     pool_size=10,
     max_overflow=20,
     pool_pre_ping=True,  # Reconexión automática si la BD cae

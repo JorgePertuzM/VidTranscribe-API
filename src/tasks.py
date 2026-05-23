@@ -26,8 +26,8 @@ logger = logging.getLogger(__name__)
 # Configurar Celery
 celery_app = Celery(
     "vidtranscribe",
-    broker=settings.redis_url,
-    backend=settings.redis_url.replace("redis://", "rpc://")
+    broker=settings.effective_redis_url,
+    backend=settings.effective_redis_url.replace("redis://", "rpc://")
 )
 celery_app.conf.update(
     task_serializer="json",

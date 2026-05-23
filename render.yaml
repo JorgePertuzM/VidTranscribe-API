@@ -1,0 +1,96 @@
+# render.yaml
+# Blueprint para Render: https://render.com/docs/blueprint-spec
+# Despliega: PostgreSQL + Redis + API + Worker con un solo click
+
+databases:
+  # ================= POSTGRESQL =================
+  - name: vidtranscribe-db
+    databaseName: vidtranscribe
+    user: vidtranscribe
+    plan: free  # Cambiar a 'starter' para producción con más recursos
+    ipAllowList: []  # Permitir acceso solo desde servicios de Render (seguro por defecto)
+
+services:
+  # ================= API (FastAPI - Web Service) =================
+  - type: web
+    name: vidtranscribe-api
+    env: docker
+    dockerfilePath: ./Dockerfile
+    dockerContext: .
+    plan: free  # Cambiar a 'starter' para más CPU/memoria
+    healthCheckPath: /health
+    autoDeploy: true  # Desplegar automáticamente al hacer push a main
+    
+    # Variables de entorno
+    envVars:
+      # ================= DATABASE (Render inyecta PG* automáticamente) =================
+      # No agregar PGHOST, PGPORT, etc. manualmente - Render lo hace al conectar la BD
+      # Solo asegurarse de NO sobrescribir estas variables aquí
+      
+      # ================= REDIS (Render inyecta REDIS_URL automáticamente) =================
+      # Igual que arriba - Render inyecta REDIS_URL al conectar el servicio Redis
+      
+      # ================= GEMINI (Configurar manualmente en dashboard) =================
+      - key: GEMINI_API_KEYS
+        sync: false  # ⚠️ Configurar manualmente en Render Dashboard con tus claves reales
+      
+      # ================= APP CONFIG =================
+      - key: GEMINI_MODEL
+        value: gemini-2.5-flash
+      - key: DEBUG
+        value: false  # Producción: desactivar debug
+      - key: UPLOAD_DIR
+        value: /app/uploads  # Ruta dentro del contenedor
+      - key: MAX_FILE_SIZE_MB
+        value: "1500"
+      - key: MAX_DURATION_MIN
+        value: "120"
+      - key: CHUNK_DURATION_SEC
+        value: "150"
+      - key: CHUNK_OVERLAP_SEC
+        value: "5"
+      - key: HOST
+        value: "0.0.0.0"  # Escuchar en todas las interfaces
+      - key: PORT
+        value: "8000"
+
+  # ================= WORKER (Celery - Background Worker) =================
+  - type: worker
+    name: vidtranscribe-worker
+    env: docker
+    dockerfilePath: ./Dockerfile
+    dockerContext: .
+    # Sobrescribe el CMD del Dockerfile para ejecutar Celery
+    dockerCommand: celery -A src.tasks worker --loglevel=info -c 2
+    plan: free
+    autoDeploy: true
+    
+    # Mismas variables que la API para consistencia
+    envVars:
+      # DATABASE y REDIS: Render los inyecta automáticamente (no agregar manualmente)
+      
+      # GEMINI
+      - key: GEMINI_API_KEYS
+        sync: false  # ⚠️ Configurar manualmente en dashboard
+      
+      # APP CONFIG
+      - key: GEMINI_MODEL
+        value: gemini-2.5-flash
+      - key: DEBUG
+        value: false
+      - key: UPLOAD_DIR
+        value: /app/uploads
+      - key: MAX_FILE_SIZE_MB
+        value: "1500"
+      - key: MAX_DURATION_MIN
+        value: "120"
+      - key: CHUNK_DURATION_SEC
+        value: "150"
+      - key: CHUNK_OVERLAP_SEC
+        value: "5"
+
+  # ================= REDIS (Cola de Tareas para Celery) =================
+  - type: redis
+    name: vidtranscribe-redis
+    plan: free  # Cambiar a 'starter' para producción con más memoria
+    maxmemoryPolicy: allkeys-lru  # Evict least recently used keys when full

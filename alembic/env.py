@@ -33,7 +33,7 @@ if config.config_file_name is not None:
 target_metadata = Base.metadata
 
 # Sobrescribir URL desde settings (ignora alembic.ini)
-config.set_main_option("sqlalchemy.url", settings.database_url)
+config.set_main_option("sqlalchemy.url", settings.effective_database_url)
 
 
 def run_migrations_offline() -> None:
