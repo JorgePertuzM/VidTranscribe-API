@@ -3,7 +3,7 @@ name: vidtranscribe
 
 services:
   # =============================================================================
-  # POSTGRESQL (Base de datos principal)
+  # POSTGRESQL (Base de datos principal - SOLO LOCAL)
   # =============================================================================
   postgres:
     image: postgres:16-alpine
@@ -14,7 +14,7 @@ services:
       POSTGRES_PASSWORD: ${DB_PASSWORD:-postgres}
       POSTGRES_DB: ${DB_NAME:-vidtranscribe}
     ports:
-      - "5432:5432"  # 🔐 En producción: comentar para no exponer públicamente
+      - "5432:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
       - ./docker/postgres/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
@@ -26,9 +26,11 @@ services:
       start_period: 30s
     networks:
       - vidtranscribe-net
+    profiles:
+      - local
 
   # =============================================================================
-  # REDIS (Cola de tareas para Celery)
+  # REDIS (Cola de tareas - SOLO LOCAL)
   # =============================================================================
   redis:
     image: redis:7-alpine
@@ -36,7 +38,7 @@ services:
     restart: unless-stopped
     command: redis-server --appendonly yes --maxmemory 256mb --maxmemory-policy allkeys-lru
     ports:
-      - "6379:6379"  # 🔐 En producción: comentar para no exponer
+      - "6379:6379"
     volumes:
       - redis_data:/data
     healthcheck:
@@ -47,9 +49,11 @@ services:
       start_period: 10s
     networks:
       - vidtranscribe-net
+    profiles:
+      - local
 
   # =============================================================================
-  # PGADMIN (Opcional: interfaz web para gestionar PostgreSQL)
+  # PGADMIN (Opcional - SOLO LOCAL)
   # =============================================================================
   pgadmin:
     image: dpage/pgadmin4:latest
@@ -64,12 +68,11 @@ services:
     volumes:
       - pgadmin_data:/var/lib/pgadmin
     depends_on:
-      postgres:
-        condition: service_healthy
+      - postgres
     networks:
       - vidtranscribe-net
     profiles:
-      - tools  # Solo se inicia con: docker compose --profile tools up
+      - tools
 
   # =============================================================================
   # API (FastAPI - Servidor principal)
@@ -81,24 +84,23 @@ services:
     container_name: vidtranscribe-api
     restart: unless-stopped
     ports:
-      - "8000:8000"  # Acceso local: http://localhost:8000
+      - "8000:8000"
     environment:
-      # Conexiones internas usando nombres de servicio de Docker
-      - DATABASE_URL=postgresql+psycopg2://${DB_USER:-postgres}:${DB_PASSWORD:-postgres}@postgres:5432/${DB_NAME:-vidtranscribe}
-      - REDIS_URL=redis://redis:6379/0
-      # Variables de aplicación
+      - DATABASE_URL=${DATABASE_URL}
+      - REDIS_URL=${REDIS_URL}
       - UPLOAD_DIR=/app/uploads
       - MAX_FILE_SIZE_MB=${MAX_FILE_SIZE_MB:-1500}
       - MAX_DURATION_MIN=${MAX_DURATION_MIN:-120}
       - CHUNK_DURATION_SEC=${CHUNK_DURATION_SEC:-150}
       - CHUNK_OVERLAP_SEC=${CHUNK_OVERLAP_SEC:-5}
       - GEMINI_MODEL=${GEMINI_MODEL:-gemini-2.5-flash}
-      # Claves de API (inyectar desde .env host o secrets manager)
       - GEMINI_API_KEYS=${GEMINI_API_KEYS}
       - DEBUG=${DEBUG:-false}
+      - PORT=8000
+      - HOST=0.0.0.0
     volumes:
-      # Montar uploads para persistencia y acceso desde worker
       - ./uploads:/app/uploads
+    # ✅ depends_on SIN 'optional' - la app maneja la conexión con retry
     depends_on:
       postgres:
         condition: service_healthy
@@ -114,7 +116,7 @@ services:
       start_period: 40s
 
   # =============================================================================
-  # WORKER (Celery - Procesamiento asíncrono de videos)
+  # WORKER (Celery - Procesamiento asíncrono)
   # =============================================================================
   worker:
     build:
@@ -122,12 +124,10 @@ services:
       dockerfile: Dockerfile
     container_name: vidtranscribe-worker
     restart: unless-stopped
-    # Sobrescribe el CMD del Dockerfile para ejecutar Celery
-    command: celery -A src.tasks worker --loglevel=info -c 4
+    command: celery -A src.tasks worker --loglevel=info -c 2
     environment:
-      # Mismas variables que la API para consistencia
-      - DATABASE_URL=postgresql+psycopg2://${DB_USER:-postgres}:${DB_PASSWORD:-postgres}@postgres:5432/${DB_NAME:-vidtranscribe}
-      - REDIS_URL=redis://redis:6379/0
+      - DATABASE_URL=${DATABASE_URL}
+      - REDIS_URL=${REDIS_URL}
       - UPLOAD_DIR=/app/uploads
       - MAX_FILE_SIZE_MB=${MAX_FILE_SIZE_MB:-1500}
       - MAX_DURATION_MIN=${MAX_DURATION_MIN:-120}
@@ -137,33 +137,23 @@ services:
       - GEMINI_API_KEYS=${GEMINI_API_KEYS}
       - DEBUG=${DEBUG:-false}
     volumes:
-      # Mismo volumen de uploads para acceder a los archivos procesados
       - ./uploads:/app/uploads
     depends_on:
-      api:
-        condition: service_healthy
-      redis:
-        condition: service_healthy
+      - api
+      - redis
     networks:
       - vidtranscribe-net
-    # Opcional: limitar recursos para evitar que un worker consuma todo el VPS
     deploy:
       resources:
         limits:
           cpus: '2'
           memory: 1G
 
-# =============================================================================
-# VOLÚMENES PERSISTENTES
-# =============================================================================
 volumes:
   postgres_data:
   redis_data:
   pgadmin_data:
 
-# =============================================================================
-# REDES AISLADAS
-# =============================================================================
 networks:
   vidtranscribe-net:
     driver: bridge

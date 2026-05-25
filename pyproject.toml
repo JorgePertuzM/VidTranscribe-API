@@ -1,3 +1,4 @@
+# pyproject.toml
 [build-system]
 requires = ["setuptools>=68.0", "wheel"]
 build-backend = "setuptools.build_meta"
@@ -23,6 +24,9 @@ dependencies = [
     "python-multipart>=0.0.18",
     "pytz>=2024.2",
     "python-dotenv>=1.0.1",
+    "reportlab>=4.2.0",      # Para generar PDFs
+    "python-docx>=1.1.0",    # Para generar Word
+    "markdown>=3.6",         # Para convertir Markdown a HTML (para PDF)
 ]
 
 [project.optional-dependencies]

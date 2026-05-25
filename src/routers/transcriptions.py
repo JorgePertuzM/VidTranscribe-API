@@ -5,10 +5,13 @@ transcripción completa con sincronización y resúmenes.
 """
 import logging
 from typing import Optional, List
-from fastapi import APIRouter, Depends, HTTPException, Query, Body
+from fastapi import APIRouter, Depends, HTTPException, Query, Body, Request
 from sqlalchemy.orm import Session, joinedload
 from sqlalchemy import func, or_, and_, text, case
 from pydantic import BaseModel, Field
+import re
+from fastapi.responses import Response
+from src.services.export_service import generate_pdf, generate_word
 
 from src.database import get_db
 from src.models import Video, Chunk, Transcription, Summary, VideoStatus, ChunkStatus
@@ -61,6 +64,7 @@ class FullTranscriptionResponse(BaseModel):
     title: str
     duration_sec: float
     status: str
+    audio_url: Optional[str] = None
     chunks: List[ChunkResponse]
     
     class Config:
@@ -183,6 +187,7 @@ def list_transcriptions(
 @router.get("/{video_id}/full", response_model=FullTranscriptionResponse, tags=["Transcriptions"])
 def get_full_transcription(
     video_id: str,
+    request: Request,
     db: Session = Depends(get_db)
 ):
     """
@@ -209,6 +214,13 @@ def get_full_transcription(
     if not video:
         raise HTTPException(status_code=404, detail="Video no encontrado")
     
+    # Construir audio_url solo si el video está transcrito y tiene audio procesado
+    audio_url = None
+    if video.status == VideoStatus.transcrita:
+        # Construir URL absoluta usando la base del request
+        base_url = str(request.base_url).rstrip('/')
+        audio_url = f"{base_url}/api/v1/videos/{video_id}/stream"
+        
     # Ordenar chunks por índice y filtrar los que tienen transcripción
     chunks_with_transcription = [
         ChunkResponse(
@@ -234,6 +246,7 @@ def get_full_transcription(
         title=video.title,
         duration_sec=video.duration_sec,
         status=video.status.value,
+        audio_url=audio_url,  # ← Incluir el nuevo campo
         chunks=chunks_with_transcription
     )
 
@@ -385,7 +398,7 @@ def search_in_transcription(
 @router.get("/{video_id}/download/summary", tags=["Transcriptions"])
 def download_summary(
     video_id: str,
-    format: str = Query("markdown", regex="^(markdown|txt|json)$"),
+    format: str = Query("markdown", regex="^(markdown|txt|json|pdf|word)$"),
     db: Session = Depends(get_db)
 ):
     """
@@ -395,10 +408,13 @@ def download_summary(
     - markdown: (default) Resumen estructurado con #, ##, -, etc.
     - txt: Texto plano sin formato
     - json: Resumen como objeto JSON estructurado
+    - pdf: Documento PDF con estilo académico
+    - word: Documento Microsoft Word (.docx)
     
     Uso:
-    GET /api/v1/videos/{id}/download/summary?format=markdown
+    GET /api/v1/transcriptions/{video_id}/download/summary?format=pdf
     """
+    
     video = db.query(Video).options(
         joinedload(Video.summary)
     ).filter(Video.id == video_id).first()
@@ -407,18 +423,41 @@ def download_summary(
         raise HTTPException(status_code=404, detail="Resumen no encontrado")
     
     content = video.summary.content
+    safe_title = re.sub(r'[^\w\s-]', '', video.title).strip().replace(' ', '_')
     
-    if format == "txt":
-        # Convertir Markdown básico a texto plano
-        import re
-        plain = re.sub(r'^#{1,6}\s*', '', content, flags=re.MULTILINE)  # Quitar headers
-        plain = re.sub(r'^-\s*', '• ', plain, flags=re.MULTILINE)  # Listas
-        plain = re.sub(r'\*\*(.*?)\*\*', r'\1', plain)  # Negritas
+    # PDF
+    if format == "pdf":
+        pdf_bytes = generate_pdf(content, video.title)
+        return Response(
+            content=pdf_bytes,
+            media_type="application/pdf",
+            headers={
+                "Content-Disposition": f'attachment; filename="Resumen_{safe_title}.pdf"',
+                "Content-Length": str(len(pdf_bytes))
+            }
+        )
+    
+    # Word
+    elif format == "word":
+        word_bytes = generate_word(content, video.title)
+        return Response(
+            content=word_bytes,
+            media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            headers={
+                "Content-Disposition": f'attachment; filename="Resumen_{safe_title}.docx"',
+                "Content-Length": str(len(word_bytes))
+            }
+        )
+    
+    # TXT
+    elif format == "txt":
+        plain = re.sub(r'^#{1,6}\s*', '', content, flags=re.MULTILINE)
+        plain = re.sub(r'^-\s*', '• ', plain, flags=re.MULTILINE)
+        plain = re.sub(r'\*\*(.*?)\*\*', r'\1', plain)
         return {"content": plain, "format": "txt"}
     
+    # JSON
     elif format == "json":
-        # Parsear Markdown estructurado a JSON (básico)
-        import re
         sections = {}
         current_section = "intro"
         for line in content.split('\n'):
@@ -431,7 +470,8 @@ def download_summary(
                 sections[current_section].append(line.strip())
         return {"content": sections, "format": "json"}
     
-    else:  # markdown (default)
+    # Markdown (default)
+    else:
         return {"content": content, "format": "markdown"}
 
 

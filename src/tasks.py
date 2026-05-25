@@ -16,7 +16,8 @@ from src.models import Video, Chunk, Transcription, Summary, VideoStatus, ChunkS
 from src.config import settings
 from src.services.audio import extract_audio, split_audio_with_overlap, cleanup_video_files
 from src.services.gemini_router import GeminiKeyRouter
-from src.schemas.gemini import GeminiChunkResponse  # Lo crearemos después
+from src.schemas.gemini import GeminiChunkResponse
+from src.prompts import prompt_manager  # ✅ NUEVA IMPORTACIÓN
 
 from google import genai
 from google.genai import types
@@ -36,54 +37,74 @@ celery_app.conf.update(
     timezone="UTC",
     enable_utc=True,
     task_track_started=True,
-    task_time_limit=1800,  # 30 minutos máximo por tarea
-    task_soft_time_limit=1500,  # 25 minutos soft limit
+    task_time_limit=1800,
+    task_soft_time_limit=1500,
 )
 
-@celery_app.task(bind=True, max_retries=8, default_retry_delay=30)
+
+@celery_app.task(bind=True, max_retries=3, default_retry_delay=10)
 def process_video_upload(self, video_id: str, video_path: str, title: str):
     """
     Tarea principal: procesa un video subido desde extracción hasta transcripción completa.
-    
-    Flujo:
-    1. Extraer audio del video
-    2. Dividir audio en chunks con solape
-    3. Registrar chunks en BD
-    4. Encolar transcripción de cada chunk
-    5. Generar resumen al finalizar
     """
     db: Session = SessionLocal()
-    router = GeminiKeyRouter()
+    
+    audio_path: str | None = None
+    work_dir: str | None = None
+    video = None
+    chunks_dir: str | None = None
     
     try:
-        # 1. Actualizar estado del video
         video = db.query(Video).filter(Video.id == video_id).first()
         if not video:
-            raise ValueError(f"Video {video_id} not found")
+            raise ValueError(f"Video {video_id} not found in database")
         
         video.status = VideoStatus.procesando
         db.commit()
         
-        # 2. Crear directorio de trabajo
-        work_dir = os.path.join(settings.upload_dir, title)
-        os.makedirs(work_dir, exist_ok=True)
+        if not os.path.isfile(video_path):
+            error_msg = f"Video file NOT FOUND: {video_path}"
+            logger.error(f"[{title}] {error_msg}")
+            video.status = VideoStatus.error
+            video.error_reason = error_msg[:200]
+            db.commit()
+            raise FileNotFoundError(error_msg)
         
-        # 3. Extraer audio
+        logger.info(f"[{title}] File verified: {video_path} (size: {os.path.getsize(video_path)} bytes)")
+        
+        work_dir = os.path.join(settings.upload_dir, f"temp_{video_id}")
+        os.makedirs(work_dir, exist_ok=True)
+        chunks_dir = os.path.join(work_dir, "chunks")
+        os.makedirs(chunks_dir, exist_ok=True)
+        
         logger.info(f"[{title}] Extracting audio...")
-        audio_path = extract_audio(video_path, work_dir)
+        try:
+            audio_path = extract_audio(video_path, work_dir)
+            if not audio_path or not os.path.isfile(audio_path):
+                raise RuntimeError(f"extract_audio returned invalid path: {audio_path}")
+            logger.info(f"[{title}] Audio extracted: {audio_path}")
+            
+            video.audio_path = audio_path
+            db.commit()
+            
+        except Exception as e:
+            logger.error(f"[{title}] FFmpeg extraction failed: {e}")
+            video.status = VideoStatus.error
+            video.error_reason = f"Audio extraction failed: {str(e)[:150]}"
+            db.commit()
+            raise
+
         video.status = VideoStatus.cargada
         db.commit()
         
-        # 4. Dividir en chunks
         logger.info(f"[{title}] Splitting audio into chunks...")
         chunks_meta = split_audio_with_overlap(
             audio_path=audio_path,
-            output_dir=os.path.join(work_dir, "chunks"),
+            output_dir=chunks_dir,
             chunk_duration=settings.chunk_duration_sec,
             overlap=settings.chunk_overlap_sec
         )
         
-        # 5. Registrar chunks en BD
         logger.info(f"[{title}] Registering {len(chunks_meta)} chunks in DB...")
         for meta in chunks_meta:
             chunk = Chunk(
@@ -97,42 +118,81 @@ def process_video_upload(self, video_id: str, video_path: str, title: str):
             db.add(chunk)
         db.commit()
         
-        # 6. Encolar transcripción de cada chunk (en paralelo)
         logger.info(f"[{title}] Queueing transcription tasks...")
         for meta in chunks_meta:
-            transcribe_chunk.delay(
-                chunk_id=str([c.id for c in video.chunks if c.index == meta.index][0]),
-                chunk_path=meta.file_path,
-                title=title
-            )
+            chunk = db.query(Chunk).filter(
+                Chunk.video_id == video_id, 
+                Chunk.index == meta.index
+            ).first()
+            if chunk:
+                transcribe_chunk.delay(
+                    chunk_id=str(chunk.id),
+                    chunk_path=meta.file_path,
+                    title=title
+                )
         
-        # 7. Actualizar estado a "transcribiendo"
         video.status = VideoStatus.transcribiendo
         db.commit()
         
-        logger.info(f"[{title}] Video processing queued successfully")
+        logger.info(f"[{title}] ✅ Processing queued successfully")
         return {"status": "queued", "chunks": len(chunks_meta)}
         
-    except Exception as e:
-        logger.error(f"[{title}] Error in process_video_upload: {e}", exc_info=True)
+    except FileNotFoundError as e:
+        logger.error(f"[{title}] Permanent error (no retry): {e}")
         if video:
             video.status = VideoStatus.error
+            video.error_reason = str(e)[:200]
             db.commit()
-        raise self.retry(exc=e, countdown=60)
+        raise
+        
+    except Exception as e:
+        logger.error(f"[{title}] Unexpected error: {type(e).__name__}: {e}", exc_info=True)
+        if video:
+            video.status = VideoStatus.error
+            video.error_reason = f"{type(e).__name__}: {str(e)[:150]}"
+            db.commit()
+        if self.request.retries < self.max_retries:
+            raise self.retry(exc=e, countdown=10 * (self.request.retries + 1))
+        raise
         
     finally:
-        db.close()
-        # Limpieza opcional: eliminar video original, conservar audio y chunks
-        cleanup_video_files(video_path, audio_path, os.path.join(work_dir, "chunks"), keep_audio=True)
+        if db:
+            db.close()
+        
+        try:
+            paths_to_clean = []
+            if video_path and os.path.exists(video_path):
+                paths_to_clean.append(video_path)
+            if audio_path and os.path.exists(audio_path):
+                paths_to_clean.append(audio_path)
+            if chunks_dir and os.path.exists(chunks_dir):
+                paths_to_clean.append(chunks_dir)
+            
+            if paths_to_clean:
+                logger.debug(f"[{title}] Cleaning up: {paths_to_clean}")
+                cleanup_video_files(
+                    video_path=video_path if video_path in paths_to_clean else None,
+                    audio_path=audio_path if audio_path in paths_to_clean else None,
+                    chunks_dir=chunks_dir if chunks_dir in paths_to_clean else None,
+                    keep_audio=True
+                )
+        except Exception as cleanup_error:
+            logger.warning(f"[{title}] Cleanup warning (non-fatal): {cleanup_error}")
 
+# =============================================================================
+# TAREA: TRANSCRIBIR CHUNK (ACTUALIZADA CON PROMPT MANAGER Y MÚLTIPLES HABLANTES)
+# =============================================================================
 
 @celery_app.task(bind=True, max_retries=12, default_retry_delay=15)
 def transcribe_chunk(self, chunk_id: str, chunk_path: str, title: str):
     """
-    Transcribe un chunk de audio usando Gemini con rotación de keys y manejo de límites.
+    Transcribe un chunk de audio usando Gemini con rotación de keys.
+    Soporta identificación de múltiples hablantes dentro del mismo fragmento.
     """
     db: Session = SessionLocal()
     router = GeminiKeyRouter()
+    chunk = None
+    key_idx = None
     
     try:
         chunk = db.query(Chunk).filter(Chunk.id == chunk_id).first()
@@ -145,7 +205,6 @@ def transcribe_chunk(self, chunk_id: str, chunk_path: str, title: str):
         # 1. Obtener una API key disponible
         key_idx, api_key = router.get_available_key()
         if api_key is None:
-            # Todas las keys agotadas: reencolar con backoff hasta reset de cuota
             logger.warning(f"[{title}] All API keys exhausted. Retrying in 2 min...")
             raise self.retry(countdown=120, exc=Exception("ALL_KEYS_EXHAUSTED"))
         
@@ -156,21 +215,8 @@ def transcribe_chunk(self, chunk_id: str, chunk_path: str, title: str):
         with open(chunk_path, "rb") as f:
             audio_bytes = f.read()
         
-        # Prompt estructurado para JSON mode
-        prompt = """
-Transcribe literalmente el siguiente fragmento de audio de máximo 2.5 minutos.
-Responde ÚNICAMENTE en JSON válido siguiendo este esquema exacto:
-
-{
-  "transcription": "texto literal transcrito. Usa [cruce voces], [inentendible] o [Ruido de fondo] si aplica.",
-  "speaker": "infiere quién habla: 'Narrador principal', 'Estudiante', 'Desconocido', etc.",
-  "sentiment": "positivo | negativo | neutro",
-  "tone": "autoridad | inseguridad | conversacional | didáctico | otro",
-  "confidence": 0.0 a 1.0 (qué tan seguro estás de la transcripción)
-}
-
-No añadas explicaciones, markdown, ni texto fuera del JSON.
-""".strip()
+        # ✅ Usar prompt desde archivo externo
+        prompt = prompt_manager.get_transcribe_prompt()
         
         # 3. Llamar a Gemini con JSON mode
         response = client.models.generate_content(
@@ -185,55 +231,77 @@ No añadas explicaciones, markdown, ni texto fuera del JSON.
             )
         )
         
-        # 4. Parsear respuesta
+        # 4. Parsear respuesta (diccionario con "segments")
         result = router.parse_gemini_response(response.text)
         
-        # 5. Validar y guardar transcripción
+        # 5. Validar con el modelo Pydantic
+        gemini_response = GeminiChunkResponse(**result)
+        
+        # 6. Convertir a formato de texto para guardar en BD
+        #    Formato: [Speaker] (start - end): texto
+        formatted_text = gemini_response.to_formatted_text(include_timestamps=True)
+        
+        # 7. Obtener metadata agregada para compatibilidad con modelo actual
+        primary_speaker = gemini_response.get_primary_speaker()
+        dominant_sentiment = gemini_response.get_dominant_sentiment()
+        avg_confidence = gemini_response.get_average_confidence()
+        
+        # 8. Guardar transcripción
         transcription = Transcription(
             chunk_id=chunk_id,
-            text=result["transcription"],
-            speaker=result.get("speaker", "Desconocido"),
-            sentiment=result["sentiment"],
-            tone=result["tone"],
-            confidence=result.get("confidence")
+            text=formatted_text,
+            speaker=primary_speaker,
+            sentiment=dominant_sentiment,
+            tone="múltiple",  # Porque puede haber varios tonos
+            confidence=avg_confidence
         )
         db.add(transcription)
         
-        # 6. Actualizar estado del chunk
+        # 9. Actualizar estado del chunk
         chunk.status = ChunkStatus.transcrita
         db.commit()
         
-        # 7. Registrar uso de la key (SOLO si fue exitoso)
+        # 10. Registrar uso de la key (SOLO si fue exitoso)
         router.record_usage(key_idx)
-        logger.info(f"[{title}] Chunk {chunk.index} transcribed with key #{key_idx}")
         
-        # 8. Verificar si todos los chunks del video están listos → generar resumen
+        segments_count = len(gemini_response.segments)
+        logger.info(f"[{title}] Chunk {chunk.index} transcribed: {segments_count} segment(s), primary speaker: '{primary_speaker}', confidence: {avg_confidence:.2f}")
+        
+        # 11. Verificar si todos los chunks del video están listos → generar resumen
         _check_and_generate_summary.delay(video_id=str(chunk.video_id), title=title)
         
-        return {"status": "success", "chunk_index": chunk.index}
+        return {
+            "status": "success", 
+            "chunk_index": chunk.index,
+            "segments": segments_count,
+            "primary_speaker": primary_speaker,
+            "confidence": avg_confidence
+        }
         
     except Exception as e:
         error_str = str(e).upper()
         
         # Manejo específico de errores de cuota de Gemini
         if "429" in error_str or "RESOURCE_EXHAUSTED" in error_str or "RATE_LIMIT" in error_str:
-            logger.warning(f"[{title}] Key #{key_idx if 'key_idx' in locals() else '?'} hit 429. Retrying with backoff...")
-            # Forzar bloqueo de esta key incrementando su contador
-            if 'key_idx' in locals() and key_idx is not None:
+            logger.warning(f"[{title}] Key #{key_idx if key_idx is not None else '?'} hit 429. Retrying with backoff...")
+            if key_idx is not None:
                 router.record_usage(key_idx)
-            return self.retry(countdown=2 ** min(self.request.retries, 6) * 10)  # Backoff exponencial: 20s, 40s, 80s...
+            return self.retry(countdown=2 ** min(self.request.retries, 6) * 10)
         
         # Otros errores: reintento genérico
         logger.error(f"[{title}] Error transcribing chunk {chunk_id}: {e}", exc_info=True)
         if chunk:
             chunk.status = ChunkStatus.error
-            chunk.error_reason = str(e)[:200]
+            chunk.error_reason = str(e)[:500]
             db.commit()
         return self.retry(countdown=30, exc=e)
         
     finally:
         db.close()
 
+# =============================================================================
+# TAREA: VERIFICAR Y GENERAR RESUMEN (ACTUALIZADA CON PROMPT MANAGER)
+# =============================================================================
 
 @celery_app.task(bind=True, max_retries=3, default_retry_delay=60)
 def _check_and_generate_summary(self, video_id: str, title: str):
@@ -253,7 +321,6 @@ def _check_and_generate_summary(self, video_id: str, title: str):
         transcribed_chunks = sum(1 for c in video.chunks if c.status == ChunkStatus.transcrita)
         
         if transcribed_chunks < total_chunks:
-            # Aún no están todos: reencolar para verificar después
             return self.retry(countdown=30)
         
         # Verificar si ya existe resumen (idempotencia)
@@ -270,39 +337,22 @@ def _check_and_generate_summary(self, video_id: str, title: str):
         ]
         full_text = "\n".join(transcriptions)
         
-        # 2. Generar resumen con Gemini (usar una key disponible)
+        # 2. Generar resumen con Gemini
         router = GeminiKeyRouter()
         key_idx, api_key = router.get_available_key()
         if not api_key:
             return self.retry(countdown=120)
         
         client = router.get_gemini_client(api_key)
-        summary_prompt = f"""
-Eres un asistente académico experto. Genera un resumen estructurado y bien formateado de la siguiente transcripción de clase universitaria.
-
-Formato requerido (Markdown):
-# Resumen: {title}
-
-## 📋 Puntos Clave
-- [Punto 1]
-- [Punto 2]
-- ...
-
-## 🎯 Conclusiones Principales
-[2-3 conclusiones fundamentales]
-
-## ❓ Preguntas para Reflexión
-- [Pregunta 1]
-- [Pregunta 2]
-
-## 🔍 Términos Importantes
-- **Término**: definición breve
-
-Transcripción completa:
-{full_text[:100000]}  # Límite de seguridad de tokens
-""".strip()
         
-        # ✅ DESPUÉS (usa text/plain, que SÍ es válido):
+        # ✅ Usar prompt desde archivo externo con formato
+        prompt_template = prompt_manager.get_summary_prompt()
+        summary_prompt = prompt_template.format(
+            title=title,
+            full_text=full_text[:100000]
+        )
+        
+        # 3. Llamar a Gemini
         response = client.models.generate_content(
             model=router.model_name,
             contents=[summary_prompt],
@@ -311,18 +361,18 @@ Transcripción completa:
             )
         )
         
-        # 3. Guardar resumen en BD
+        # 4. Guardar resumen en BD
         summary = Summary(
             video_id=video_id,
             content=response.text.strip()
         )
         db.add(summary)
         
-        # 4. Actualizar estado final del video
+        # 5. Actualizar estado final del video
         video.status = VideoStatus.transcrita
         db.commit()
         
-        # 5. Registrar uso de key
+        # 6. Registrar uso de key
         router.record_usage(key_idx)
         logger.info(f"[{title}] Summary generated successfully")
         

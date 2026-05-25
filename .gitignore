@@ -38,6 +38,7 @@ env/
 # ================= Secrets y Config =================
 .env
 .env.local
+.env.production
 .env.*.local
 *.key
 *.pem

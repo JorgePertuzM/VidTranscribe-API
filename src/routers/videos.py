@@ -16,6 +16,7 @@ from src.database import get_db
 from src.models import Video, Chunk, VideoStatus, ChunkStatus
 from src.config import settings
 from src.tasks import process_video_upload
+from fastapi.responses import FileResponse
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -252,3 +253,81 @@ def delete_video(video_id: uuid.UUID, db: Session = Depends(get_db)):
     db.commit()
     
     return None  # 204 No Content
+
+@router.get(
+    "/{video_id}/stream", 
+    tags=["Videos"],
+    responses={
+        200: {
+            "description": "Stream de audio en formato MP3",
+            "content": {
+                "audio/mpeg": {
+                    "schema": {"type": "string", "format": "binary"}
+                }
+            }
+        },
+        400: {"description": "Audio no disponible aún"},
+        404: {"description": "Video o archivo de audio no encontrado"}
+    }
+)
+async def stream_audio(
+    video_id: uuid.UUID,  # ✅ Usar UUID para consistencia con otros endpoints
+    db: Session = Depends(get_db)
+):
+    """
+    Stream del archivo de audio completo procesado.
+    
+    Soporta Range requests para seeking en el reproductor.
+    Solo disponible cuando el video está en estado 'completado'.
+    """
+    # -------------------------------------------------------------------------
+    # 1. Validar que el video existe
+    # -------------------------------------------------------------------------
+    video = db.query(Video).filter(Video.id == video_id).first()
+    if not video:
+        raise HTTPException(
+            status_code=404, 
+            detail="Video no encontrado"
+        )
+    
+    # -------------------------------------------------------------------------
+    # 2. Validar que el procesamiento está completo y hay audio disponible
+    # -------------------------------------------------------------------------
+    if video.status != VideoStatus.transcrita:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Audio no disponible aún. Estado actual: {video.status.value}. Espere a que termine la transcripción."
+        )
+    
+    if not video.audio_path:
+        raise HTTPException(
+            status_code=404, 
+            detail="Ruta de audio no registrada en base de datos"
+        )
+    
+    # -------------------------------------------------------------------------
+    # 3. Validar que el archivo físico existe en el sistema
+    # -------------------------------------------------------------------------
+    audio_path = Path(video.audio_path)
+    if not audio_path.exists():
+        logger.error(f"Audio file not found on disk: {audio_path}")
+        # Opcional: marcar como error en BD para diagnóstico
+        raise HTTPException(
+            status_code=404, 
+            detail="Archivo de audio no encontrado en el servidor"
+        )
+    
+    # -------------------------------------------------------------------------
+    # 4. Retornar FileResponse con headers para streaming eficiente
+    # -------------------------------------------------------------------------
+    return FileResponse(
+        path=str(audio_path),
+        media_type="audio/mpeg",  # o "audio/wav" según tu formato de salida
+        filename=f"{video.title}.mp3",
+        headers={
+            "Accept-Ranges": "bytes",  # ✅ Permite seeking en el reproductor
+            "Cache-Control": "public, max-age=3600",  # Cache por 1 hora
+        }
+    )
+    
+    

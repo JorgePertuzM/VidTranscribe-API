@@ -37,7 +37,18 @@ def extract_audio(video_path: str, output_dir: str) -> str:
         
     Returns:
         Ruta absoluta al archivo MP3 generado
+        
+    Raises:
+        FileNotFoundError: Si el video no existe
+        RuntimeError: Si FFmpeg falla al procesar el archivo
     """
+    # ✅ VALIDACIÓN: Verificar que el archivo de entrada existe
+    if not os.path.exists(video_path):
+        raise FileNotFoundError(f"Video file not found: {video_path}")
+    
+    if not os.path.isfile(video_path):
+        raise ValueError(f"Path is not a file: {video_path}")
+    
     Path(output_dir).mkdir(parents=True, exist_ok=True)
     output_path = os.path.join(output_dir, "audio_full.mp3")
     
@@ -58,11 +69,25 @@ def extract_audio(video_path: str, output_dir: str) -> str:
             )
             .run(overwrite_output=True, capture_stdout=True, capture_stderr=True)
         )
+        
+        # ✅ VALIDACIÓN POST-PROCESO: Verificar que el archivo se creó
+        if not os.path.exists(output_path):
+            raise RuntimeError(f"FFmpeg completed but output file was not created: {output_path}")
+            
         return output_path
+        
     except ffmpeg.Error as e:
         stderr = e.stderr.decode() if e.stderr else "Unknown error"
-        raise RuntimeError(f"FFmpeg failed to extract audio: {stderr}")
-
+        # ✅ ERROR MÁS INFORMATIVO
+        raise RuntimeError(
+            f"FFmpeg failed to extract audio from '{video_path}': {stderr}"
+        ) from e
+    except Exception as e:
+        # ✅ CAPTURAR CUALQUIER OTRO ERROR
+        raise RuntimeError(
+            f"Unexpected error while extracting audio from '{video_path}': {str(e)}"
+        ) from e
+        
 def split_audio_with_overlap(
     audio_path: str,
     output_dir: str,

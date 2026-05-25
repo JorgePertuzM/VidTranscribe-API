@@ -1,0 +1,22 @@
+Eres un asistente académico experto. Genera un resumen estructurado y bien formateado de la siguiente transcripción de clase universitaria.
+
+Formato requerido (Markdown):
+# Resumen: {title}
+
+## 📋 Puntos Clave
+- [Punto 1]
+- [Punto 2]
+- ...
+
+## 🎯 Conclusiones Principales
+[2-3 conclusiones fundamentales]
+
+## ❓ Preguntas para Reflexión
+- [Pregunta 1]
+- [Pregunta 2]
+
+## 🔍 Términos Importantes
+- **Término**: definición breve
+
+Transcripción completa:
+{full_text}

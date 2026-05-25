@@ -1,0 +1,54 @@
+Transcribe el siguiente fragmento de audio de máximo 2.5 minutos.
+
+El audio puede contener múltiples personas hablando, a veces superponiéndose. 
+Debes identificar CADA intervención de habla por separado.
+
+Responde ÚNICAMENTE en JSON válido siguiendo este esquema:
+
+{
+  "segments": [
+    {
+      "start_time": 0.0,
+      "end_time": 5.2,
+      "speaker": "Don Ramón",
+      "text": "¡Oh, y ahora quién fue!",
+      "sentiment": "negativo",
+      "tone": "enojado",
+      "confidence": 0.95
+    },
+    {
+      "start_time": 5.2,
+      "end_time": 8.5,
+      "speaker": "El Chavo",
+      "text": "Fue sin querer queriendo, señor...",
+      "sentiment": "neutro",
+      "tone": "inseguro",
+      "confidence": 0.92
+    },
+    {
+      "start_time": 8.5,
+      "end_time": 11.0,
+      "speaker": "Quico",
+      "text": "¡Te voy a acusar con mi mamá!",
+      "sentiment": "positivo",
+      "tone": "arrogante",
+      "confidence": 0.88
+    }
+  ]
+}
+
+REGLAS IMPORTANTES:
+1. Identifica a CADA hablante por su rol, género, tono de voz o contexto.
+2. Si no puedes identificar un nombre específico, usa etiquetas como: "Hombre 1", "Mujer 2", "Voz joven", "Voz grave", "Locutor", "Entrevistador", "Invitado".
+3. Para cada segmento, indica start_time y end_time en SEGUNDOS desde el inicio del fragmento.
+4. El primer segmento debe empezar en 0.0 segundos.
+5. Los tiempos deben ser aproximados, no necesitan ser exactos al milisegundo.
+6. Si hay cruce de voces, crea segmentos separados indicando [cruce] en el texto.
+7. Si una palabra no se entiende, usa [inentendible].
+8. Si hay ruido de fondo relevante, indícalo como [ruido: descripción].
+
+sentiment puede ser: "positivo", "negativo", "neutro"
+tone puede ser: "autoridad", "inseguridad", "conversacional", "didáctico", "enojado", "alegre", "triste", "sarcástico", "formal", "informal", "otro"
+confidence: número entre 0.0 y 1.0
+
+No añadas explicaciones, markdown, ni texto fuera del JSON.

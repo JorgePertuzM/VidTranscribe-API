@@ -46,3 +46,13 @@ def root():
         "version": "0.1.0",
         "docs": "/docs"
     }
+
+@router.post("/prompts/reload", tags=["System"])
+def reload_prompts():
+    """
+    Recarga los prompts desde los archivos sin reiniciar el servidor.
+    Útil durante el desarrollo para probar cambios en los prompts.
+    """
+    from src.prompts import prompt_manager
+    prompt_manager.reload()
+    return {"status": "ok", "message": "Prompts recargados exitosamente"}
